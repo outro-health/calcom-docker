@@ -24,7 +24,8 @@ ENV NEXT_PUBLIC_WEBAPP_URL=http://NEXT_PUBLIC_WEBAPP_URL_PLACEHOLDER \
     DATABASE_URL=$DATABASE_URL \
     DATABASE_DIRECT_URL=$DATABASE_URL \
     NEXTAUTH_SECRET=${NEXTAUTH_SECRET} \
-    CALENDSO_ENCRYPTION_KEY=${CALENDSO_ENCRYPTION_KEY}
+    CALENDSO_ENCRYPTION_KEY=${CALENDSO_ENCRYPTION_KEY} \
+    NODE_OPTIONS=--max-old-space-size=${MAX_OLD_SPACE_SIZE}
 
 RUN apk add --no-cache libc6-compat
 RUN apk update
@@ -45,7 +46,6 @@ RUN yarn install
 
 COPY --from=builder /calcom/out/full/ .
 
-ENV NODE_OPTIONS=--max-old-space-size=${MAX_OLD_SPACE_SIZE}
 RUN yarn turbo run build --filter=@calcom/web...
 
 FROM base as runner
@@ -59,11 +59,9 @@ USER nextjs
 COPY --from=installer /calcom/apps/web/next.config.js .
 COPY --from=installer /calcom/apps/web/package.json .
 
-# Automatically leverage output traces to reduce image size
+# TODO: Automatically leverage output traces to reduce image size
 # https://nextjs.org/docs/advanced-features/output-file-tracing
-# COPY --from=installer --chown=nextjs:nodejs /calcom/apps/web/.next/standalone ./
-# COPY --from=installer --chown=nextjs:nodejs /calcom/apps/web/.next/static ./apps/web/.next/static
-COPY --from=installer --chown=nextjs:nodejs /calcom/apps/web/public ./apps/web/public
+COPY --chown=nextjs:nodejs scripts scripts
 
 ENV NODE_ENV production
 EXPOSE 3000
