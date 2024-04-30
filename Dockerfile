@@ -72,14 +72,16 @@ COPY --from=installer /calcom/apps/web/next.config.js .
 COPY --from=installer /calcom/apps/web/package.json .
 COPY --from=installer /calcom/packages/prisma ./packages/prisma
 
-# TODO: Automatically leverage output traces to reduce image size
-# https://nextjs.org/docs/advanced-features/output-file-tracing
-
 COPY --chown=nextjs:nodejs \
     scripts/start.sh \
     scripts/wait-for-it.sh \
     /calcom/scripts/
-COPY --from=installer --chown=nextjs:nodejs /calcom/apps/web/.next ./
+
+# Automatically leverage output traces to reduce image size
+# https://nextjs.org/docs/advanced-features/output-file-tracing
+COPY --from=installer --chown=nextjs:nodejs /calcom/apps/web/.next/standalone ./
+COPY --from=installer --chown=nextjs:nodejs /calcom/apps/web/.next/static ./apps/web/.next/static
+COPY --from=installer --chown=nextjs:nodejs /calcom/apps/web/public ./apps/web/public
 
 ENV CALCOM_TELEMETRY_DISABLED=1
 ENV NEXT_TELEMETRY_DISABLED=1
