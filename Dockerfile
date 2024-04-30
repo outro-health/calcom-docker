@@ -1,4 +1,4 @@
-FROM node:20-alpine as base
+FROM node:18-alpine as base
 
 FROM base as builder
 RUN apk add --no-cache libc6-compat
@@ -11,8 +11,14 @@ RUN turbo prune --scope=@calcom/web --docker
 
 FROM base as installer
 
+ENV CALCOM_TELEMETRY_DISABLED=1
+# CHECKPOINT_DISABLE disables Prisma's telemetry
+ENV CHECKPOINT_DISABLE=1
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV NODE_ENV=production
+ENV STORYBOOK_DISABLE_TELEMETRY=1
+
 ARG NEXT_PUBLIC_LICENSE_CONSENT
-ARG CALCOM_TELEMETRY_DISABLED
 ARG DATABASE_URL
 ARG NEXTAUTH_SECRET=secret
 ARG CALENDSO_ENCRYPTION_KEY=secret
@@ -20,7 +26,6 @@ ARG MAX_OLD_SPACE_SIZE=4096
 
 ENV NEXT_PUBLIC_WEBAPP_URL=http://NEXT_PUBLIC_WEBAPP_URL_PLACEHOLDER \
     NEXT_PUBLIC_LICENSE_CONSENT=$NEXT_PUBLIC_LICENSE_CONSENT \
-    CALCOM_TELEMETRY_DISABLED=$CALCOM_TELEMETRY_DISABLED \
     DATABASE_URL=$DATABASE_URL \
     DATABASE_DIRECT_URL=$DATABASE_URL \
     NEXTAUTH_SECRET=${NEXTAUTH_SECRET} \
@@ -46,6 +51,13 @@ RUN yarn install
 
 COPY --from=builder /calcom/out/full/ .
 
+# Set CI so that linting and type checking are skipped during the build.  This is to
+# lower the build time.  to have no other effects in Cal.com during build (currently).
+# Defaults `yarn install` to use `--immutable`, which isn't desirable here because
+# `yarn.lock` needs to be rebuilt, so it is set here after `yarn install` has already
+# run.
+ENV CI=1
+
 RUN yarn turbo run build --filter=@calcom/web...
 
 FROM base as runner
@@ -58,12 +70,24 @@ USER nextjs
 
 COPY --from=installer /calcom/apps/web/next.config.js .
 COPY --from=installer /calcom/apps/web/package.json .
+COPY --from=installer /calcom/packages/prisma ./packages/prisma
 
 # TODO: Automatically leverage output traces to reduce image size
 # https://nextjs.org/docs/advanced-features/output-file-tracing
-COPY --chown=nextjs:nodejs scripts scripts
 
-ENV NODE_ENV production
+COPY --chown=nextjs:nodejs \
+    scripts/start.sh \
+    scripts/wait-for-it.sh \
+    /calcom/scripts/
+COPY --from=installer --chown=nextjs:nodejs /calcom/apps/web/.next ./
+
+ENV CALCOM_TELEMETRY_DISABLED=1
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV NODE_ENV=production
+ENV STORYBOOK_DISABLE_TELEMETRY=1
+ENV CHECKPOINT_DISABLE=1
+ENV NODE_ENV=production
+
 EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=30s --retries=5 \
