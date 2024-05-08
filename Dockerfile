@@ -1,9 +1,24 @@
-FROM node:18 as builder
+FROM node:18-alpine as base
+
+FROM base as builder
+RUN apk add --no-cache libc6-compat
+RUN apk update
 
 WORKDIR /calcom
+RUN yarn global add turbo
+COPY calcom/. .
+RUN turbo prune --scope=@calcom/web --docker
+
+FROM base as installer
+
+ENV CALCOM_TELEMETRY_DISABLED=1
+# CHECKPOINT_DISABLE disables Prisma's telemetry
+ENV CHECKPOINT_DISABLE=1
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV NODE_ENV=production
+ENV STORYBOOK_DISABLE_TELEMETRY=1
 
 ARG NEXT_PUBLIC_LICENSE_CONSENT
-ARG CALCOM_TELEMETRY_DISABLED
 ARG DATABASE_URL
 ARG NEXTAUTH_SECRET=secret
 ARG CALENDSO_ENCRYPTION_KEY=secret
@@ -11,63 +26,70 @@ ARG MAX_OLD_SPACE_SIZE=4096
 
 ENV NEXT_PUBLIC_WEBAPP_URL=http://NEXT_PUBLIC_WEBAPP_URL_PLACEHOLDER \
     NEXT_PUBLIC_LICENSE_CONSENT=$NEXT_PUBLIC_LICENSE_CONSENT \
-    CALCOM_TELEMETRY_DISABLED=$CALCOM_TELEMETRY_DISABLED \
     DATABASE_URL=$DATABASE_URL \
     DATABASE_DIRECT_URL=$DATABASE_URL \
     NEXTAUTH_SECRET=${NEXTAUTH_SECRET} \
     CALENDSO_ENCRYPTION_KEY=${CALENDSO_ENCRYPTION_KEY} \
     NODE_OPTIONS=--max-old-space-size=${MAX_OLD_SPACE_SIZE}
 
+RUN apk add --no-cache libc6-compat
+RUN apk update
+WORKDIR /calcom
+
+COPY .gitignore .gitignore
+COPY --from=builder /calcom/out/json/ .
+COPY --from=builder /calcom/out/yarn.lock ./yarn.lock
+
+# TODO: Determine which of these can go
 COPY calcom/package.json calcom/yarn.lock calcom/.yarnrc.yml calcom/playwright.config.ts calcom/turbo.json calcom/git-init.sh calcom/git-setup.sh ./
 COPY calcom/.yarn ./.yarn
 COPY calcom/apps/web ./apps/web
 COPY calcom/packages ./packages
 COPY calcom/tests ./tests
 
-RUN yarn config set httpTimeout 1200000 && \ 
-    npx turbo prune --scope=@calcom/web --docker && \
-    yarn install && \
-    yarn db-deploy && \
-    yarn --cwd packages/prisma seed-app-store
+RUN yarn install
 
-RUN yarn turbo run build --filter=@calcom/web
+COPY --from=builder /calcom/out/full/ .
 
-# RUN yarn plugin import workspace-tools && \
-#     yarn workspaces focus --all --production
-RUN rm -rf node_modules/.cache .yarn/cache apps/web/.next/cache
+# Set CI so that linting and type checking are skipped during the build.  This is to
+# lower the build time.  to have no other effects in Cal.com during build (currently).
+# Defaults `yarn install` to use `--immutable`, which isn't desirable here because
+# `yarn.lock` needs to be rebuilt, so it is set here after `yarn install` has already
+# run.
+ENV CI=1
 
-FROM node:18 as builder-two
+RUN yarn turbo run build --filter=@calcom/web...
 
+FROM base as runner
 WORKDIR /calcom
-ARG NEXT_PUBLIC_WEBAPP_URL=http://localhost:3000
 
-ENV NODE_ENV production
+# Don't run production as root
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+USER nextjs
 
-COPY calcom/package.json calcom/.yarnrc.yml calcom/yarn.lock calcom/turbo.json ./
-COPY calcom/.yarn ./.yarn
-COPY --from=builder /calcom/node_modules ./node_modules
-COPY --from=builder /calcom/packages ./packages
-COPY --from=builder /calcom/apps/web ./apps/web
-COPY --from=builder /calcom/packages/prisma/schema.prisma ./prisma/schema.prisma
-COPY scripts scripts
+COPY --from=installer /calcom/apps/web/next.config.js .
+COPY --from=installer /calcom/apps/web/package.json .
+COPY --from=installer /calcom/packages/prisma ./packages/prisma
 
-# Save value used during this build stage. If NEXT_PUBLIC_WEBAPP_URL and BUILT_NEXT_PUBLIC_WEBAPP_URL differ at
-# run-time, then start.sh will find/replace static values again.
-ENV NEXT_PUBLIC_WEBAPP_URL=$NEXT_PUBLIC_WEBAPP_URL \
-    BUILT_NEXT_PUBLIC_WEBAPP_URL=$NEXT_PUBLIC_WEBAPP_URL
+COPY --chown=nextjs:nodejs \
+    scripts/start.sh \
+    scripts/wait-for-it.sh \
+    /calcom/scripts/
 
-RUN scripts/replace-placeholder.sh http://NEXT_PUBLIC_WEBAPP_URL_PLACEHOLDER ${NEXT_PUBLIC_WEBAPP_URL}
+# Automatically leverage output traces to reduce image size
+# https://nextjs.org/docs/advanced-features/output-file-tracing
+COPY --from=installer --chown=nextjs:nodejs /calcom/apps/web/.next/standalone ./
+COPY --from=installer --chown=nextjs:nodejs /calcom/apps/web/.next/static ./apps/web/.next/static
+COPY --from=installer --chown=nextjs:nodejs /calcom/apps/web/public ./apps/web/public
 
-FROM node:18 as runner
+ENV CALCOM_TELEMETRY_DISABLED=1
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV NODE_ENV=production
+ENV STORYBOOK_DISABLE_TELEMETRY=1
+ENV CHECKPOINT_DISABLE=1
+ENV NODE_ENV=production
 
-
-WORKDIR /calcom
-COPY --from=builder-two /calcom ./
-ARG NEXT_PUBLIC_WEBAPP_URL=http://localhost:3000
-ENV NEXT_PUBLIC_WEBAPP_URL=$NEXT_PUBLIC_WEBAPP_URL \
-    BUILT_NEXT_PUBLIC_WEBAPP_URL=$NEXT_PUBLIC_WEBAPP_URL
-
-ENV NODE_ENV production
 EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=30s --retries=5 \
